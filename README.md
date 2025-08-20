@@ -1,2 +1,4 @@
 # FX-
-FXシュミレーション
+├─ app.py
+├─ requirements.txt
+└─ runtime.txt
