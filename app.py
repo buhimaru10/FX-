@@ -1,107 +1,129 @@
 # -*- coding: utf-8 -*-
-import math, numpy as np, pandas as pd, streamlit as st
-st.set_page_config(page_title="FXシミュレーション（NISA風）", layout="wide")
+import datetime as dt
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-def round_0005(x: float) -> float:
-    third = math.floor(x*1000)/1000.0
-    fourth = int(x*10000) % 10
-    return third if fourth <= 4 else third + 0.0005
+st.set_page_config(page_title="FXシミュレーション", layout="wide")
 
-def build_prices(mode, days, s0, s1=None, manual=None):
-    if mode == "手入力（日足レート配列）":
-        arr = [float(v) for v in manual.replace("\n", ",").split(",") if v.strip()!=""]
-        return np.array(arr, dtype=float)
-    return np.linspace(s0, s1, days+1)
+# ------------------ ヘルパ ------------------
+def build_dates(start_date: dt.date, days: int) -> pd.DatetimeIndex:
+    return pd.date_range(start=start_date, periods=days + 1, freq="D")
 
-def compute(prices, deposit, lots, sign, swap_per_lot_per_day, lev):
-    units = lots * 100_000
+def build_prices_linear(days: int, s0: float, s1: float) -> np.ndarray:
+    return np.linspace(s0, s1, days + 1)
+
+def compute_series(
+    dates: pd.DatetimeIndex,
+    prices: np.ndarray,
+    initial_deposit: float,
+    lots: int,
+    direction_sign: int,
+    swap_per_lot_per_day: float,
+    fee_per_lot_roundtrip: float,  # 1,100円（往復/枚）ではなく、片側/枚=1,100円を渡す
+) -> tuple[pd.DataFrame, dict]:
+    """
+    手数料は「建て」と「決済」の2回のみ発生（1枚あたり 1,100円を各タイミングで控除）。
+    総損益・口座状況は手数料込みで表示。
+    """
+    n = len(prices)
+    units = lots * 100_000                       # 1枚=10万通貨
     diff = np.diff(prices, prepend=prices[0])
-    pnl_fx = sign * diff * units
-    swap = np.full_like(prices, swap_per_lot_per_day * lots, dtype=float)
-    pnl_total = pnl_fx + swap
-    equity = deposit + np.cumsum(pnl_total)
-    req_margin = (prices * units) / lev
-    ml = equity / req_margin * 100.0
-    mc = ml < 100.0
+
+    pnl_fx = direction_sign * diff * units                   # 為替損益（毎日）
+    swap = np.full(n, swap_per_lot_per_day * lots, float)    # スワップ（毎日）
+
+    fee = np.zeros(n)                                        # 手数料（建て/決済のみ）
+    if n >= 1:
+        fee[0] -= fee_per_lot_roundtrip * lots               # 建て時
+    if n >= 2:
+        fee[-1] -= fee_per_lot_roundtrip * lots              # 決済時
+
+    pnl_total = pnl_fx + swap + fee
+    equity = initial_deposit + np.cumsum(pnl_total)
+
     df = pd.DataFrame({
-        "day": np.arange(len(prices)), "price": prices, "pnl_fx": pnl_fx,
-        "swap": swap, "pnl_total": pnl_total, "口座状況": equity,
-        "required_margin": req_margin, "margin_level_pct": ml, "margin_call": mc
+        "date": dates,
+        "price": prices,
+        "pnl_fx": pnl_fx,
+        "swap": swap,
+        "fee": fee,
+        "pnl_total": pnl_total,
+        "口座状況": equity,
     })
-    s = {
-        "総損益": float(pnl_total.sum()),
-        "うちスワップ": float(swap.sum()),
-        "うち為替損益": float(pnl_fx.sum()),
-        "ROI": float(pnl_total.sum()/deposit),
-        "最大ドローダウン": float((equity/np.maximum.accumulate(equity)-1.0).min()),
-        "初回MC発生日": int(df.loc[df["margin_call"]].head(1)["day"].values[0]) if df["margin_call"].any() else None
+
+    summary = {
+        "期末口座状況": float(equity[-1]),
+        "総損益(手数料込み)": float(equity[-1] - initial_deposit),
+        "スワップ累計": float(swap.sum()),
+        "手数料合計": float(fee.sum()),  # 負の値（支払い）
     }
-    return df, s
+    return df, summary
 
-def to_csv(df): return df.to_csv(index=False).encode("utf-8-sig")
 
+# ------------------ サイドバー（入力） ------------------
 with st.sidebar:
     st.header("入力")
-    pair = st.selectbox("通貨ペア", ["MXN/JPY"])
-    deposit = st.number_input("初回入金額 (円)", value=10_000_000, step=100_000, format="%d")
-    lev = st.number_input("最大レバレッジ", value=25, min_value=1, max_value=100, step=1)
-    lots_mode = st.radio("枚数の決め方", ["直接指定", "実効レバから自動"], horizontal=True)
+    initial_deposit = st.number_input("初回入金額（円）", value=10_000_000, step=100_000, format="%d")
+    leverage_note = st.number_input("レバレッジ（参考）", value=25, min_value=1, max_value=100, step=1)
+    lots = int(st.number_input("建玉枚数（1枚＝10万通貨）", value=33, min_value=1, max_value=5000, step=1))
 
-    c = st.columns(2)
-    with c[0]:
-        init_raw = st.number_input("初期レート (MXN/JPY)", value=7.8476, step=0.0001, format="%.4f")
-    with c[1]:
-        s0 = round_0005(init_raw)
-        st.caption("丸め規則（小数第4位→0/5）")
-        st.metric("使用する初期レート", f"{s0:.4f}")
+    # 1枚あたりの必要証拠金（表示/管理用）
+    per_lot_margin = st.number_input("必要証拠金（1枚あたり／円）", value=40_000, step=1_000, format="%d")
+    st.caption(f"必要証拠金の目安（合計）：{per_lot_margin * max(lots,1):,} 円")
 
-    days = st.slider("運用期間（日）", 30, 730, 365, step=5)
     direction = st.radio("売買方向", ["買い", "売り"], horizontal=True)
-    sign = 1 if direction=="買い" else -1
-    swap = st.number_input("スワップ (円/枚/日)", value=150, step=10, format="%d")
+    direction_sign = 1 if direction == "買い" else -1
 
-    price_mode = st.radio("レートの作り方", ["期末レートで線形補間", "手入力（日足レート配列）"])
-    if price_mode == "期末レートで線形補間":
-        s1 = st.number_input("期末レート (MXN/JPY)", value=8.2000, step=0.0005, format="%.4f")
-        manual = None
+    swap_per_lot_per_day = st.number_input("スワップ（円／枚／日）", value=150, step=10, format="%d")
+    days = st.slider("運用期間（日）", min_value=30, max_value=730, value=365, step=5)
+
+    # 価格は 0.1 円刻み
+    s0 = st.number_input("初期レート（MXN/JPY）", value=7.8, step=0.1, format="%.1f")
+    s1 = st.number_input("期末レート（MXN/JPY）", value=8.2, step=0.1, format="%.1f")
+
+    # 開始日：自動（本日）/ 手動
+    start_mode = st.radio("開始日", ["自動（本日）", "手動"], horizontal=True)
+    if start_mode == "手動":
+        start_date = st.date_input("手動の開始日", value=dt.date.today())
     else:
-        manual = st.text_area("レート配列（カンマ/改行）", height=140)
-        s1 = None
+        start_date = dt.date.today()
+        st.caption(f"開始日：本日（{start_date.isoformat()}）")
 
-    if lots_mode=="直接指定":
-        lots = st.number_input("建玉枚数（1枚=10万通貨）", value=33, min_value=1, max_value=2000, step=1)
-    else:
-        target_lev = st.number_input("目標レバレッジ", value=3.0, step=0.1)
-        lots = int(round((deposit * target_lev) / (s0 * 100_000)))
-        st.metric("自動計算の建玉枚数", f"{lots} 枚")
-    lots = int(lots)
+# ------------------ メイン ------------------
+st.title("FXシミュレーション")
 
-st.title("FXシミュレーション（NISA風UI）")
-prices = build_prices(price_mode, days, s0, s1, manual)
-if len(prices) < 2: st.stop()
-df, sm = compute(prices, deposit, lots, sign, swap, lev)
+# 日付 & 価格系列
+dates = build_dates(start_date, days)
+prices = build_prices_linear(days, s0, s1)
 
-c1,c2,c3,c4 = st.columns(4)
-c1.metric("期末口座状況", f"{df['口座状況'].iloc[-1]:,.0f} 円")
-c2.metric("総損益", f"{sm['総損益']:,.0f} 円")
-c3.metric("スワップ累計", f"{sm['うちスワップ']:,.0f} 円")
-c4.metric("最大ドローダウン", f"{sm['最大ドローダウン']*100:.1f} %")
+# 手数料：1枚あたり 1,100 円（税込）／建て時と決済時のみ
+FEE_PER_LOT_PER_SIDE = 1_100.0
 
-t1,t2,t3 = st.tabs(["価格推移","口座状況/維持率","データ＆DL"])
-with t1:
-    st.subheader("価格（日足）")
-    st.line_chart(df.set_index("day")[["price"]])
-with t2:
-    col = st.columns(2)
-    with col[0]:
-        st.subheader("口座状況（円）")
-        st.line_chart(df.set_index("day")[["口座状況"]])
-    with col[1]:
-        st.subheader("証拠金維持率（%）")
-        st.line_chart(df.set_index("day")[["margin_level_pct"]])
-    st.info("維持率100%割れあり：日目 {}".format(sm["初回MC発生日"]) if sm["初回MC発生日"] is not None else "維持率100%割れは発生していません。")
-with t3:
-    st.dataframe(df.head(100), use_container_width=True)
-    st.download_button("CSV（全データ）", data=to_csv(df), file_name="fx_timeseries.csv", mime="text/csv")
-    st.download_button("CSV（サマリー）", data=to_csv(pd.DataFrame([sm])), file_name="fx_summary.csv", mime="text/csv")
-st.caption("※ シミュレーション用途です。実取引の助言ではありません。")
+df, sm = compute_series(
+    dates=dates,
+    prices=prices,
+    initial_deposit=initial_deposit,
+    lots=lots,
+    direction_sign=direction_sign,
+    swap_per_lot_per_day=swap_per_lot_per_day,
+    fee_per_lot_roundtrip=FEE_PER_LOT_PER_SIDE,  # 片側/枚
+)
+
+# KPI（手数料込みのみ）
+c1, c2, c3 = st.columns(3)
+c1.metric("期末口座状況", f"{sm['期末口座状況']:,.0f} 円")
+c2.metric("総損益（手数料込み）", f"{sm['総損益(手数料込み)']:,.0f} 円")
+c3.metric("スワップ累計", f"{sm['スワップ累計']:,.0f} 円")
+
+# グラフ（価格・口座状況）
+g1, g2 = st.columns(2)
+with g1:
+    st.subheader("価格推移（日足）")
+    st.line_chart(df.set_index("date")[["price"]])
+with g2:
+    st.subheader("口座状況の推移（円）")
+    st.line_chart(df.set_index("date")[["口座状況"]])
+
+# 注記（常時表示）
+st.caption("手数料：1100円（消費税込み）売買成立時に発生")
