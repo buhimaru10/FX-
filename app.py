@@ -41,7 +41,7 @@ def lots_from_leverage(leff: float, deposit: float, s0: float) -> int:
     if s0 <= 0: return 1
     return max(1, safe_floor((leff * deposit) / (s0 * LOT_UNITS)))
 
-# ===== 損益計算（手数料=固定コスト・売りはスワップをマイナス・初日はスワップ0） =====
+# ===== 損益計算（手数料=固定・売りはスワップをマイナス・初日はスワップ0） =====
 def compute_series(prices: np.ndarray,
                    initial_deposit: float,
                    lots: int,
@@ -73,7 +73,7 @@ def compute_series(prices: np.ndarray,
     pnl_total = pnl_fx + swap + fee
     equity = initial_deposit + np.cumsum(pnl_total)
 
-    # 集計（手数料は常にコスト：fee_totalは負）
+    # 集計（手数料は常にコスト）
     fx_total   = float(pnl_fx.sum())
     swap_total = float(swap.sum())
     fee_total  = float(fee.sum())
@@ -93,7 +93,7 @@ def compute_series(prices: np.ndarray,
     return summary
 
 # ================================
-# サイドバー（実効レバ⇄枚数：相互更新）
+# サイドバー（実効レバ⇄枚数 相互更新）
 # ================================
 with st.sidebar:
     st.header("入力")
@@ -169,7 +169,7 @@ with st.sidebar:
         min_value=30, max_value=730, value=st.session_state.days, step=5)
 
 # ================================
-# 本体（KPI）＋ 横長チャート
+# 本体（KPI）
 # ================================
 st.title("FXシミュレーション")
 
@@ -189,12 +189,17 @@ k1, k2, k3 = st.columns(3)
 k1.metric("期末口座状況", f"{sm['期末口座状況']:,.0f} 円")
 k2.metric("為替差損益（手数料込）", f"{sm['為替差損益(手数料込)']:,.0f} 円")
 k3.metric("スワップポイント利益", f"{sm['スワップポイント利益']:,.0f} 円")
+
+# 補助情報 & 注記（※チャートより上にまとめる）
 c1, c2 = st.columns(2)
 c1.caption(f"実効レバレッジ（計算結果）：{leff_actual:.2f} 倍")
 c2.caption(f"必要証拠金の目安（合計）：{need_margin_total:,} 円")
+cap_display = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
+st.caption("手数料：1100円（消費税込み）売買成立時に発生（建て・決済の2回）")
+st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
 
 # ================================
-# チャート（横長・操作項目あり／説明は上にコンパクト）
+# チャート（ページ最後に横長で表示・初期は FX_IDC）
 # ================================
 st.markdown("### レートチャート（TradingView）")
 st.caption(
@@ -202,9 +207,9 @@ st.caption(
     f"方向: {'買い' if dir_sign==1 else '売り'} ｜ 枚数: {st.session_state.lots}枚 (レバ {leff_actual:.2f}倍)"
 )
 
-# MXN/JPY の主要シンボル候補（表示不可時の切替用）
-symbol_choices = ["OANDA:MXNJPY", "FX_IDC:MXNJPY", "FOREXCOM:MXNJPY", "SAXO:MXNJPY"]
-tv_symbol = st.selectbox("データ提供元（MXN/JPY）", symbol_choices, index=0, help="表示できない場合は他の提供元に切り替えてください。")
+# 初期選択が FX_IDC になるよう並び順＆indexを設定
+symbol_choices = ["FX_IDC:MXNJPY", "OANDA:MXNJPY", "FOREXCOM:MXNJPY", "SAXO:MXNJPY"]
+tv_symbol = st.selectbox("データ提供元（MXN/JPY）", symbol_choices, index=0)
 
 container_id = f"tv_{uuid.uuid4().hex}"
 tradingview_embed = f"""
@@ -214,19 +219,19 @@ tradingview_embed = f"""
   <script type="text/javascript">
     new TradingView.widget({{
       "container_id": "{container_id}",
-      "width": "100%",         // 横幅いっぱい
-      "height": 380,           // ← 高さ控えめで“横長”に見せる
+      "width": "100%",
+      "height": 380,                 // 横長リボン感（360〜420で微調整可）
       "symbol": "{tv_symbol}",
       "interval": "D",
       "timezone": "Asia/Tokyo",
       "theme": "light",
       "style": "1",
       "locale": "ja",
-      "withdateranges": true,          // 期間プリセット
-      "allow_symbol_change": true,     // シンボル変更
-      "hide_top_toolbar": false,       // 上部ツールバー表示
-      "hide_side_toolbar": false,      // サイドツールバー表示
-      "hide_legend": false,            // 凡例表示
+      "withdateranges": true,
+      "allow_symbol_change": true,
+      "hide_top_toolbar": false,
+      "hide_side_toolbar": false,
+      "hide_legend": false,
       "toolbar_bg": "#f1f3f6",
       "enable_publishing": false,
       "save_image": true,
@@ -235,12 +240,8 @@ tradingview_embed = f"""
   </script>
 </div>
 """
-components.html(tradingview_embed, height=400)  # コンテナ高さも近しい値に
+components.html(tradingview_embed, height=400)  # 埋め込みコンテナの高さも近い値に
 
-# 注記
-cap_display = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
-st.caption("手数料：1100円（消費税込み）売買成立時に発生（建て・決済の2回）")
-st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
 
 
 
