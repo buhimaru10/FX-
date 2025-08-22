@@ -169,34 +169,35 @@ k3.metric("スワップポイント利益", f"{sm['スワップポイント利�
 c1, c2 = st.columns(2)
 c1.caption(f"実効レバレッジ（計算結果）：{leff_actual:.2f} 倍")
 c2.caption(f"必要証拠金の目安（合計）：{need_margin_total:,} 円")
-
 # ================================
-# チャート部分（説明小さめ＋横長チャート）
+# チャート（横長・低めリボン表示）
 # ================================
 st.markdown("### レートチャート（TradingView）")
 
-# 小さめの説明
+# 説明は小さく1行で
 st.caption(
-    f"期間: {st.session_state.days}日 ｜ "
-    f"初期レート: {st.session_state.s0:.1f} ｜ "
-    f"期末レート: {st.session_state.s1:.1f} ｜ "
-    f"方向: {'買い' if dir_sign==1 else '売り'} ｜ "
-    f"枚数: {st.session_state.lots}枚 (レバ {leff_actual:.2f}倍)"
+    f"期間: {st.session_state.days}日 ｜ 初期: {st.session_state.s0:.1f} ｜ 期末: {st.session_state.s1:.1f} ｜ "
+    f"方向: {'買い' if dir_sign==1 else '売り'} ｜ 枚数: {st.session_state.lots}枚 (レバ {leff_actual:.2f}倍)"
 )
 
-symbol_choices = ["OANDA:MXNJPY", "FX_IDC:MXNJPY", "FOREXCOM:MXNJPY", "SAXO:MXNJPY"]
-tv_symbol = st.selectbox("データ提供元（MXN/JPY）", symbol_choices, index=0)
+# シンボル選択も横幅を取らないようコンパクトに
+cols = st.columns([3,1.2,6])
+with cols[1]:
+    symbol_choices = ["OANDA:MXNJPY", "FX_IDC:MXNJPY", "FOREXCOM:MXNJPY", "SAXO:MXNJPY"]
+    tv_symbol = st.selectbox(" ", symbol_choices, index=0, label_visibility="collapsed")
 
+# 超横長に見せるため、高さは低め（例: 340px）
+import uuid, streamlit.components.v1 as components
 container_id = f"tv_{uuid.uuid4().hex}"
 tradingview_embed = f"""
-<div class="tradingview-widget-container">
+<div class="tradingview-widget-container" style="width:100%;">
   <div id="{container_id}"></div>
   <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
   <script type="text/javascript">
     new TradingView.widget({{
       "container_id": "{container_id}",
       "width": "100%",
-      "height": 720,   // 高さ拡大
+      "height": 340,                 // ← 縦を低くして横長感を強調（320〜380推奨）
       "symbol": "{tv_symbol}",
       "interval": "D",
       "timezone": "Asia/Tokyo",
@@ -204,18 +205,20 @@ tradingview_embed = f"""
       "style": "1",
       "locale": "ja",
       "withdateranges": true,
-      "allow_symbol_change": true,
-      "hide_side_toolbar": false,
-      "toolbar_bg": "#f1f3f6",
+      "allow_symbol_change": false,  // 上部シンボル切替バーを消して縦を節約
+      "hide_top_toolbar": true,      // 上部ツールバー非表示
+      "hide_side_toolbar": true,     // 右サイドツールバー非表示
+      "hide_legend": true,           // 凡例非表示で縦を節約
+      "toolbar_bg": "#ffffff",
       "enable_publishing": false,
-      "hide_legend": false,
-      "save_image": false,
-      "studies": ["MASimple@tv-basicstudies"]
+      "save_image": false
     }});
   </script>
 </div>
 """
-components.html(tradingview_embed, height=740)
+components.html(tradingview_embed, height=360)  # 埋め込みコンテナも低めに
+
+
 
 
 
