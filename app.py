@@ -15,7 +15,7 @@ st.markdown("""
 
 # ===== 定数 =====
 LOT_UNITS = 100_000                 # 1枚=10万通貨
-FEE_PER_LOT_PER_SIDE = 1_100.0      # 手数料（片側/枚/税込）…建て・決済の2回
+FEE_PER_LOT_PER_SIDE = 1_100.0      # 手数料（片側/枚/税込）…建て・決済の2回、損益に関わらず必ず発生
 
 # ===== ユーティリティ =====
 def safe_floor(x: float) -> int:
@@ -26,6 +26,7 @@ def safe_floor(x: float) -> int:
         return 0
 
 def build_prices_linear(days: int, s0: float, s1: float) -> np.ndarray:
+    """初期～期末を直線で補間（表示はしない／損益計算にのみ使用）"""
     days = max(1, int(days))
     return np.linspace(s0, s1, days + 1)  # n = days+1（初日を含む）
 
@@ -38,7 +39,7 @@ def lots_from_leverage(leff: float, deposit: float, s0: float) -> int:
     if s0 <= 0: return 1
     return max(1, safe_floor((leff * deposit) / (s0 * LOT_UNITS)))
 
-# ===== 損益計算（手数料込み・売りはスワップをマイナス・初日はスワップ0） =====
+# ===== 損益計算（手数料=固定コスト・売りはスワップをマイナス・初日はスワップ0） =====
 def compute_series(prices: np.ndarray,
                    initial_deposit: float,
                    lots: int,
@@ -49,7 +50,7 @@ def compute_series(prices: np.ndarray,
     units = lots * LOT_UNITS
     diff = np.diff(prices, prepend=prices[0])  # 初日は0
 
-    # スワップ：買い=＋、売り=−。初日は0、翌日以降に計上
+    # スワップ：買い=＋、売り=−。初日は0、翌日以降に計上（合計＝日額×枚数×日数）
     swap_per_lot_effective = (1 if direction_sign == 1 else -1) * abs(swap_per_lot_per_day_input)
     daily_swap = swap_per_lot_effective * lots
     swap = np.zeros(n, dtype=float)
@@ -59,39 +60,43 @@ def compute_series(prices: np.ndarray,
     # 為替損益（建玉方向で±）
     pnl_fx = direction_sign * diff * units
 
-    # 手数料：建て時・決済時のみ控除
+    # 手数料：建て時・決済時に必ず発生（方向や損益に関係なく固定コスト）
     fee = np.zeros(n)
     if n >= 1 and lots > 0:
-        fee[0]  -= FEE_PER_LOT_PER_SIDE * lots
+        fee[0]  -= FEE_PER_LOT_PER_SIDE * lots   # 建て時
     if n >= 2 and lots > 0:
-        fee[-1] -= FEE_PER_LOT_PER_SIDE * lots
+        fee[-1] -= FEE_PER_LOT_PER_SIDE * lots   # 決済時
 
     # 合成P/Lと口座状況
     pnl_total = pnl_fx + swap + fee
     equity = initial_deposit + np.cumsum(pnl_total)
 
-    # 集計
+    # 集計（手数料は常にコスト：fee_totalは負の値）
     fx_total   = float(pnl_fx.sum())
     swap_total = float(swap.sum())
-    fee_total  = float(fee.sum())           # 負の値（支払い）
+    fee_total  = float(fee.sum())
+    fee_abs    = abs(fee_total)
     end_equity = float(equity[-1])
+
+    # 為替差損益（手数料込）= 為替P/L − 手数料（買い/売りに関係なく「利益からコストを引く」）
+    fx_fee_inclusive = fx_total - fee_abs
 
     summary = {
         "期末口座状況": end_equity,
-        "為替差損益(手数料込)": fx_total + fee_total,            # 為替P/L＋手数料（スワップ除く）
-        "スワップポイント利益": swap_total,                        # = (日/枚)×枚数×日数（買い:+／売り:-）
-        "総損益(手数料込み)": end_equity - initial_deposit,        # 参考
+        "為替差損益(手数料込)": fx_fee_inclusive,
+        "スワップポイント利益": swap_total,
+        "総損益(手数料込み)": end_equity - initial_deposit,  # 参考（画面表示はしない）
         "手数料合計": fee_total
     }
     return summary
 
 # ================================
-# サイドバー（双方向リンクの中枢）
+# サイドバー（双方向リンク：実効レバ⇄枚数）
 # ================================
 with st.sidebar:
     st.header("入力")
 
-    # --- セッション初期値 ---
+    # セッション初期値
     defaults = {
         "deposit": 10_000_000,
         "per_lot_margin": 40_000,
@@ -100,7 +105,7 @@ with st.sidebar:
         "s0": 7.8,
         "s1": 8.2,
         "days": 365,
-        "_lock": False,  # 相互更新の再帰ループを防ぐロック
+        "_lock": False,  # 相互更新の再帰ループ防止
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -131,7 +136,7 @@ with st.sidebar:
         step=0.1, min_value=0.1, on_change=on_change_leff
     )
 
-    # 4) 枚数（整数）— leff と相互更新（実効レバを再計算して上書き）
+    # 4) 枚数（整数）— leff と相互更新
     def on_change_lots():
         if st.session_state._lock: return
         st.session_state._lock = True
@@ -162,7 +167,6 @@ with st.sidebar:
     def on_change_s0():
         if st.session_state._lock: return
         st.session_state._lock = True
-        # leff -> lots を優先的に反映（上限クランプ）
         cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
         lots_lev = lots_from_leverage(st.session_state.leff, st.session_state.deposit, st.session_state.s0)
         st.session_state.lots = max(1, min(lots_lev, cap))
@@ -185,14 +189,14 @@ with st.sidebar:
     )
 
 # ================================
-# 本体（KPIのみ）
+# 本体（KPIのみ・ご指定順）
 # ================================
 st.title("FXシミュレーション")
 
 # 価格系列（直線。損益計算にのみ使用）
 prices = build_prices_linear(st.session_state.days, st.session_state.s0, st.session_state.s1)
 
-# 計算（手数料込み）
+# 計算（手数料は固定コストとして建て/決済で必ず控除）
 sm = compute_series(
     prices=prices,
     initial_deposit=st.session_state.deposit,
@@ -208,7 +212,7 @@ leff_actual = (
 )
 need_margin_total = st.session_state.per_lot_margin * st.session_state.lots
 
-# ===== KPI（ご指定の順） =====
+# KPI（期末口座状況 → 為替差損益（手数料込） → スワップポイント利益）
 k1, k2, k3 = st.columns(3)
 k1.metric("期末口座状況", f"{sm['期末口座状況']:,.0f} 円")
 k2.metric("為替差損益（手数料込）", f"{sm['為替差損益(手数料込)']:,.0f} 円")
@@ -221,7 +225,7 @@ c2.caption(f"必要証拠金の目安（合計）：{need_margin_total:,} 円")
 
 # 注記
 cap_display = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
-st.caption("手数料：1100円（消費税込み）売買成立時に発生")
+st.caption("手数料：1100円（消費税込み）売買成立時に発生（売買成立時：建て・決済の2回）")
 st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
 
 
