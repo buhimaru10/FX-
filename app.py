@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import math
+import uuid
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -124,7 +125,7 @@ with st.sidebar:
             leff_actual = (st.session_state.lots * st.session_state.s0 * LOT_UNITS) / st.session_state.deposit
             st.session_state.leff = max(0.1, round(leff_actual, 2))
 
-    # 1) 初回入金
+    # 1) 初回入金（変化時に整合）
     def on_change_deposit():
         if st.session_state._lock: return
         st.session_state._lock = True
@@ -136,7 +137,7 @@ with st.sidebar:
         step=100_000, format="%d", min_value=0, on_change=on_change_deposit
     )
 
-    # 2) 必要証拠金（1枚）
+    # 2) 必要証拠金（1枚）（変化時に整合）
     def on_change_margin():
         if st.session_state._lock: return
         st.session_state._lock = True
@@ -148,7 +149,7 @@ with st.sidebar:
         step=1_000, format="%d", min_value=0, on_change=on_change_margin
     )
 
-    # 3) 実効レバ（指定可）— lots と相互更新
+    # 3) 実効レバレッジ（指定可）— lots と相互更新
     def on_change_leff():
         if st.session_state._lock: return
         st.session_state._lock = True
@@ -181,7 +182,7 @@ with st.sidebar:
         "スワップ（円／枚／日）", value=150, step=10, format="%d", min_value=0
     )
 
-    # 7) 初期レート（0.1円刻み）
+    # 7) 初期レート（0.1円刻み）— 変わったら相互計算を整合
     def on_change_s0():
         if st.session_state._lock: return
         st.session_state._lock = True
@@ -245,7 +246,7 @@ st.caption("手数料：1100円（消費税込み）売買成立時に発生（�
 st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
 
 # ================================
-# 右側スペース：TradingView レートチャートのみ表示
+# 右側スペース：TradingView レートチャートのみ表示（シンボル切替対応）
 # ================================
 left_info, right_chart = st.columns([1, 2])
 
@@ -265,17 +266,28 @@ with left_info:
 
 with right_chart:
     st.subheader("レートチャート（TradingView）")
-    tradingview_embed = """
+
+    # ▼ MXN/JPY の主要シンボル候補
+    symbol_choices = [
+        "OANDA:MXNJPY",
+        "FX_IDC:MXNJPY",
+        "FOREXCOM:MXNJPY",
+        "SAXO:MXNJPY",
+    ]
+    tv_symbol = st.selectbox("データ提供元（MXN/JPY）", symbol_choices, index=0, help="表示できない場合は他の提供元に切り替えてください。")
+
+    container_id = f"tv_{uuid.uuid4().hex}"  # 再実行時のID衝突を回避
+    tradingview_embed = f"""
     <!-- TradingView Widget BEGIN -->
     <div class="tradingview-widget-container">
-      <div id="tradingview_chart"></div>
+      <div id="{container_id}"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
-        new TradingView.widget({
-          "container_id": "tradingview_chart",
+        new TradingView.widget({{
+          "container_id": "{container_id}",
           "width": "100%",
           "height": 520,
-          "symbol": "FX:MXNJPY",         // ★ MXN/JPY
+          "symbol": "{tv_symbol}",
           "interval": "D",
           "timezone": "Asia/Tokyo",
           "theme": "light",
@@ -286,11 +298,10 @@ with right_chart:
           "hide_legend": false,
           "save_image": false,
           "studies": ["MASimple@tv-basicstudies"]
-        });
+        }});
       </script>
     </div>
     <!-- TradingView Widget END -->
     """
     components.html(tradingview_embed, height=540)
-
 
