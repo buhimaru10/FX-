@@ -3,6 +3,7 @@ import math
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ===== ページ設定（余白コンパクト） =====
 st.set_page_config(page_title="FXシミュレーション", layout="wide")
@@ -78,7 +79,7 @@ def compute_series(prices: np.ndarray,
     fee_abs    = abs(fee_total)
     end_equity = float(equity[-1])
 
-    # 為替差損益（手数料込）= 為替P/L − 手数料（買い/売りに関係なく「利益からコストを引く」）
+    # 為替差損益（手数料込）= 為替P/L − 手数料
     fx_fee_inclusive = fx_total - fee_abs
 
     summary = {
@@ -110,25 +111,48 @@ with st.sidebar:
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
-    # 1) 初回入金
-    st.session_state.deposit = st.number_input(
-        "初回入金額（円）", value=st.session_state.deposit,
-        step=100_000, format="%d", min_value=0
-    )
-
-    # 2) 必要証拠金（1枚）
-    st.session_state.per_lot_margin = st.number_input(
-        "必要証拠金（1枚あたり／円）", value=st.session_state.per_lot_margin,
-        step=1_000, format="%d", min_value=0
-    )
-
-    # 3) 実効レバレッジ（指定可）— lots と相互更新
-    def on_change_leff():
-        if st.session_state._lock: return
-        st.session_state._lock = True
+    # ---- 相互更新用ヘルパ ----
+    def _recalc_from_leff():
         cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
         lots_lev = lots_from_leverage(st.session_state.leff, st.session_state.deposit, st.session_state.s0)
         st.session_state.lots = max(1, min(lots_lev, cap))
+
+    def _recalc_from_lots():
+        cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
+        st.session_state.lots = max(1, min(int(st.session_state.lots), cap))
+        if st.session_state.deposit > 0 and st.session_state.s0 > 0:
+            leff_actual = (st.session_state.lots * st.session_state.s0 * LOT_UNITS) / st.session_state.deposit
+            st.session_state.leff = max(0.1, round(leff_actual, 2))
+
+    # 1) 初回入金
+    def on_change_deposit():
+        if st.session_state._lock: return
+        st.session_state._lock = True
+        _recalc_from_leff()
+        st.session_state._lock = False
+
+    st.session_state.deposit = st.number_input(
+        "初回入金額（円）", value=st.session_state.deposit,
+        step=100_000, format="%d", min_value=0, on_change=on_change_deposit
+    )
+
+    # 2) 必要証拠金（1枚）
+    def on_change_margin():
+        if st.session_state._lock: return
+        st.session_state._lock = True
+        _recalc_from_leff()
+        st.session_state._lock = False
+
+    st.session_state.per_lot_margin = st.number_input(
+        "必要証拠金（1枚あたり／円）", value=st.session_state.per_lot_margin,
+        step=1_000, format="%d", min_value=0, on_change=on_change_margin
+    )
+
+    # 3) 実効レバ（指定可）— lots と相互更新
+    def on_change_leff():
+        if st.session_state._lock: return
+        st.session_state._lock = True
+        _recalc_from_leff()
         st.session_state._lock = False
 
     st.number_input(
@@ -136,17 +160,11 @@ with st.sidebar:
         step=0.1, min_value=0.1, on_change=on_change_leff
     )
 
-    # 4) 枚数（整数）— leff と相互更新
+    # 4) 枚数（整数）— leff と相互更新（実効レバの直下に配置）
     def on_change_lots():
         if st.session_state._lock: return
         st.session_state._lock = True
-        cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
-        # 上限クランプ
-        st.session_state.lots = max(1, min(int(st.session_state.lots), cap))
-        # lots -> leff 再計算（2桁丸め）
-        if st.session_state.deposit > 0 and st.session_state.s0 > 0:
-            leff_actual = (st.session_state.lots * st.session_state.s0 * LOT_UNITS) / st.session_state.deposit
-            st.session_state.leff = max(0.1, round(leff_actual, 2))
+        _recalc_from_lots()
         st.session_state._lock = False
 
     st.number_input(
@@ -163,13 +181,11 @@ with st.sidebar:
         "スワップ（円／枚／日）", value=150, step=10, format="%d", min_value=0
     )
 
-    # 7) 初期レート（0.1円刻み）— 変わったら相互計算を整合
+    # 7) 初期レート（0.1円刻み）
     def on_change_s0():
         if st.session_state._lock: return
         st.session_state._lock = True
-        cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
-        lots_lev = lots_from_leverage(st.session_state.leff, st.session_state.deposit, st.session_state.s0)
-        st.session_state.lots = max(1, min(lots_lev, cap))
+        _recalc_from_leff()
         st.session_state._lock = False
 
     st.session_state.s0 = st.number_input(
@@ -189,7 +205,7 @@ with st.sidebar:
     )
 
 # ================================
-# 本体（KPIのみ・ご指定順）
+# 本体（KPIのみ・ご指定順）＋右側にTradingView
 # ================================
 st.title("FXシミュレーション")
 
@@ -227,5 +243,54 @@ c2.caption(f"必要証拠金の目安（合計）：{need_margin_total:,} 円")
 cap_display = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
 st.caption("手数料：1100円（消費税込み）売買成立時に発生（売買成立時：建て・決済の2回）")
 st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
+
+# ================================
+# 右側スペース：TradingView レートチャートのみ表示
+# ================================
+left_info, right_chart = st.columns([1, 2])
+
+with left_info:
+    st.subheader("説明")
+    st.markdown(
+        f"""
+- **期間**：{st.session_state.days}日  
+- **初期レート**：{st.session_state.s0:.1f} MXN/JPY  
+- **期末レート**：{st.session_state.s1:.1f} MXN/JPY  
+- **方向**：{"買い" if dir_sign==1 else "売り"}  
+- **枚数**：{st.session_state.lots} 枚（実効レバ {leff_actual:.2f} 倍）  
+- **スワップ/日/枚**：{int(swap_per_lot_per_day)} 円  
+- **手数料**：建て・決済 各 {int(FEE_PER_LOT_PER_SIDE)} 円/枚（固定コスト）
+        """
+    )
+
+with right_chart:
+    st.subheader("レートチャート（TradingView）")
+    tradingview_embed = """
+    <!-- TradingView Widget BEGIN -->
+    <div class="tradingview-widget-container">
+      <div id="tradingview_chart"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+        new TradingView.widget({
+          "container_id": "tradingview_chart",
+          "width": "100%",
+          "height": 520,
+          "symbol": "FX:MXNJPY",         // ★ MXN/JPY
+          "interval": "D",
+          "timezone": "Asia/Tokyo",
+          "theme": "light",
+          "style": "1",
+          "locale": "ja",
+          "toolbar_bg": "#f1f3f6",
+          "enable_publishing": false,
+          "hide_legend": false,
+          "save_image": false,
+          "studies": ["MASimple@tv-basicstudies"]
+        });
+      </script>
+    </div>
+    <!-- TradingView Widget END -->
+    """
+    components.html(tradingview_embed, height=540)
 
 
