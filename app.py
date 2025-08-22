@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ===== ページ設定：余白をコンパクトに =====
+# ===== ページ設定（余白をコンパクトに） =====
 st.set_page_config(page_title="FXシミュレーション", layout="wide")
 st.markdown("""
 <style>
@@ -26,63 +26,67 @@ def safe_floor(x: float) -> int:
         return 0
 
 def build_prices_linear(days: int, s0: float, s1: float) -> np.ndarray:
+    """ 初期～期末を直線で補間（表示はしない／損益計算にのみ使用） """
     days = max(1, int(days))
-    return np.linspace(s0, s1, days + 1)
+    return np.linspace(s0, s1, days + 1)  # 長さ n=days+1（初日を含む）
 
 def lots_by_margin(deposit: float, per_lot_margin: float) -> int:
-    # 証拠金基準（切り下げ、最低1枚）
+    """ 証拠金基準の上限枚数（切り下げ、最低1） """
     return max(1, safe_floor(deposit / max(1.0, per_lot_margin)))
 
 def lots_by_target_leverage(leff_target: float, deposit: float, s0: float) -> int:
-    # 目標実効レバからの枚数（切り下げ、最低1枚）
+    """ 目標実効レバからの枚数（切り下げ、最低1） """
     if s0 <= 0: return 1
     return max(1, safe_floor((leff_target * deposit) / (s0 * LOT_UNITS)))
 
-# ===== 損益計算：手数料込み・売りはスワップをマイナス =====
+# ===== 損益計算：手数料込み・売りはスワップをマイナス・初日はスワップ0 =====
 def compute_series(prices: np.ndarray,
                    initial_deposit: float,
                    lots: int,
                    direction_sign: int,              # 買い:+1 / 売り:-1
                    swap_per_lot_per_day_input: float # 入力は受取額（正の値）
                    ):
-    n = len(prices)
+    n = len(prices)                      # = days + 1
     units = lots * LOT_UNITS
-    diff = np.diff(prices, prepend=prices[0])
+    diff = np.diff(prices, prepend=prices[0])  # 初日は0、その後は日次変化
 
-    # スワップ：買い=＋、売り=−（入力は正の値でOK）
+    # --- スワップ：買い=＋、売り=−／初日は0、翌日以降に計上 ---
     swap_per_lot_effective = (1 if direction_sign == 1 else -1) * abs(swap_per_lot_per_day_input)
-    swap = np.full(n, swap_per_lot_effective * lots, dtype=float)
+    daily_swap = swap_per_lot_effective * lots
+    swap = np.zeros(n, dtype=float)
+    if n > 1:
+        swap[1:] = daily_swap  # 初日0、2日目以降に同額
 
-    # 為替損益
+    # --- 為替損益（建玉方向で±） ---
     pnl_fx = direction_sign * diff * units
 
-    # 手数料：建て時・決済時のみ控除（1,100円/枚/片側）
+    # --- 手数料：建て時・決済時のみ控除（1,100円/枚/片側） ---
     fee = np.zeros(n)
     if n >= 1 and lots > 0:
         fee[0]  -= FEE_PER_LOT_PER_SIDE * lots
     if n >= 2 and lots > 0:
         fee[-1] -= FEE_PER_LOT_PER_SIDE * lots
 
-    # 合成P/Lと口座状況
+    # --- 合成P/Lと口座状況 ---
     pnl_total = pnl_fx + swap + fee
     equity = initial_deposit + np.cumsum(pnl_total)
 
-    # 合計値
+    # --- 集計（KPI用） ---
     fx_total   = float(pnl_fx.sum())
     swap_total = float(swap.sum())
-    fee_total  = float(fee.sum())              # 負の値（支払い）
+    fee_total  = float(fee.sum())              # 負の値（手数料）
     end_equity = float(equity[-1])
 
     summary = {
         "期末口座状況": end_equity,
         "為替差損益(手数料込)": fx_total + fee_total,         # 為替P/L＋手数料（スワップ除く）
-        "スワップポイント利益": swap_total,                     # スワップ合計
-        "総損益(手数料込み)": end_equity - initial_deposit,     # 参考：総合KPI（画面表示はしない）
+        "スワップポイント利益": swap_total,                     # 買い:+／売り:−、合計 = (日/枚)×枚数×日数 に一致
+        "総損益(手数料込み)": end_equity - initial_deposit,     # 参考（画面表示はしない）
         "手数料合計": fee_total
     }
     return summary
 
-# ===== サイドバー（指定の順に並べ替え） =====
+# ===== サイドバー（指定の順に配置） =====
 with st.sidebar:
     st.header("入力")
 
@@ -134,10 +138,10 @@ with st.sidebar:
             lots = int(lots_manual)
         lots_note = f"手動指定：{lots} 枚（上限 {lots_cap} 枚）"
 
-# ===== 本体（KPIのみ・シンプル） =====
+# ===== 本体（KPIのみ・シンプル表示） =====
 st.title("FXシミュレーション")
 
-# 価格系列（直線。損益にのみ使用／表示はしない）
+# 価格系列（直線。損益計算にのみ使用）
 prices = build_prices_linear(days, s0, s1)
 
 # 計算（手数料込み）
@@ -153,7 +157,7 @@ sm = compute_series(
 leff_actual = (lots * s0 * LOT_UNITS) / deposit if deposit > 0 and s0 > 0 else 0.0
 need_margin_total = per_lot_margin * lots
 
-# ===== KPI（ご指定の順で表示） =====
+# ===== KPI（ご指定の順） =====
 k1, k2, k3 = st.columns(3)
 k1.metric("期末口座状況", f"{sm['期末口座状況']:,.0f} 円")
 k2.metric("為替差損益（手数料込）", f"{sm['為替差損益(手数料込)']:,.0f} 円")
