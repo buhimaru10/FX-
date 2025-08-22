@@ -85,106 +85,128 @@ def compute_series(prices: np.ndarray,
     }
     return summary
 
-# =========================================
-# 入力（サイドバー）— 指定順＋双方向リンク
-# =========================================
+# ================================
+# サイドバー（双方向リンクの中枢）
+# ================================
 with st.sidebar:
     st.header("入力")
 
+    # --- セッション初期値 ---
+    defaults = {
+        "deposit": 10_000_000,
+        "per_lot_margin": 40_000,
+        "leff": 3.0,
+        "lots": 33,
+        "s0": 7.8,
+        "s1": 8.2,
+        "days": 365,
+        "_lock": False,  # 相互更新の再帰ループを防ぐロック
+    }
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+
     # 1) 初回入金
-    deposit = st.number_input("初回入金額（円）", value=10_000_000, step=100_000, format="%d", min_value=0)
+    st.session_state.deposit = st.number_input(
+        "初回入金額（円）", value=st.session_state.deposit,
+        step=100_000, format="%d", min_value=0
+    )
 
     # 2) 必要証拠金（1枚）
-    per_lot_margin = st.number_input("必要証拠金（1枚あたり／円）", value=40_000, step=1_000, format="%d", min_value=0)
+    st.session_state.per_lot_margin = st.number_input(
+        "必要証拠金（1枚あたり／円）", value=st.session_state.per_lot_margin,
+        step=1_000, format="%d", min_value=0
+    )
 
-    # 3) 実効レバレッジ（指定可）— 双方向リンク（lots と相互更新）
-    # セッション初期化
-    if "leff" not in st.session_state: st.session_state.leff = 3.0
-    if "lots" not in st.session_state: st.session_state.lots = 33
-    if "_suppress" not in st.session_state: st.session_state._suppress = False
-
-    # 初期レートを後で受けるが、逆算に使うため仮の現在値を読む（後で再計算するので問題なし）
-    # ここではプレースホルダ的に 7.8 を使い、実入力後に再度コールバックが走ることで整合します。
-    current_s0 = st.session_state.get("current_s0", 7.8)
-
-    # 上限（証拠金）を算出
-    lots_cap = lots_cap_by_margin(deposit, per_lot_margin)
-
+    # 3) 実効レバレッジ（指定可）— lots と相互更新
     def on_change_leff():
-        if st.session_state._suppress: return
-        st.session_state._suppress = True
-        # 目標レバから枚数を逆算 → 証拠金上限でクランプ
-        lots_lev = lots_from_leverage(st.session_state.leff, deposit, st.session_state.get("current_s0", 7.8))
-        st.session_state.lots = max(1, min(lots_lev, lots_cap_by_margin(deposit, per_lot_margin)))
-        st.session_state._suppress = False
+        if st.session_state._lock: return
+        st.session_state._lock = True
+        cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
+        lots_lev = lots_from_leverage(st.session_state.leff, st.session_state.deposit, st.session_state.s0)
+        st.session_state.lots = max(1, min(lots_lev, cap))
+        st.session_state._lock = False
 
+    st.number_input(
+        "実効レバレッジ（指定可）", key="leff",
+        step=0.1, min_value=0.1, on_change=on_change_leff
+    )
+
+    # 4) 枚数（整数）— leff と相互更新（実効レバを再計算して上書き）
     def on_change_lots():
-        if st.session_state._suppress: return
-        st.session_state._suppress = True
-        # 上限超過を抑制
-        st.session_state.lots = max(1, min(int(st.session_state.lots), lots_cap_by_margin(deposit, per_lot_margin)))
-        # 枚数から実効レバを再計算（丸めは表示上2桁に）
-        s0_used = st.session_state.get("current_s0", 7.8)
-        if deposit > 0 and s0_used > 0:
-            leff_actual = (st.session_state.lots * s0_used * LOT_UNITS) / deposit
+        if st.session_state._lock: return
+        st.session_state._lock = True
+        cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
+        # 上限クランプ
+        st.session_state.lots = max(1, min(int(st.session_state.lots), cap))
+        # lots -> leff 再計算（2桁丸め）
+        if st.session_state.deposit > 0 and st.session_state.s0 > 0:
+            leff_actual = (st.session_state.lots * st.session_state.s0 * LOT_UNITS) / st.session_state.deposit
             st.session_state.leff = max(0.1, round(leff_actual, 2))
-        st.session_state._suppress = False
+        st.session_state._lock = False
 
-    # 実効レバ → 入力
-    st.number_input("実効レバレッジ（指定可）", key="leff",
-                    value=st.session_state.leff, step=0.1, min_value=0.1,
-                    on_change=on_change_leff)
-
-    # 4) 枚数（実効レバの直下／双方向リンク）
-    st.number_input("枚数（整数）", key="lots",
-                    value=st.session_state.lots, min_value=1, step=1,
-                    on_change=on_change_lots)
+    st.number_input(
+        "枚数（整数）", key="lots",
+        min_value=1, step=1, on_change=on_change_lots
+    )
 
     # 5) 売買方向
     direction = st.radio("売買方向", ["買い", "売り"], horizontal=True)
     dir_sign = 1 if direction == "買い" else -1
 
     # 6) スワップ（受取額/日/枚：正の値で入力）
-    swap_per_lot_per_day = st.number_input("スワップ（円／枚／日）", value=150, step=10, format="%d", min_value=0)
+    swap_per_lot_per_day = st.number_input(
+        "スワップ（円／枚／日）", value=150, step=10, format="%d", min_value=0
+    )
 
-    # 7) 初期レート（0.1円刻み）— ここで確定 → セッションに保存して双方向を安定化
-    s0 = st.number_input("初期レート（MXN/JPY）", value=7.8, step=0.1, format="%.1f")
-    st.session_state.current_s0 = s0  # 双方向リンク計算で使用
+    # 7) 初期レート（0.1円刻み）— 変わったら相互計算を整合
+    def on_change_s0():
+        if st.session_state._lock: return
+        st.session_state._lock = True
+        # leff -> lots を優先的に反映（上限クランプ）
+        cap = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
+        lots_lev = lots_from_leverage(st.session_state.leff, st.session_state.deposit, st.session_state.s0)
+        st.session_state.lots = max(1, min(lots_lev, cap))
+        st.session_state._lock = False
 
-    # 初期レートが変わったら、片側の値に同期（上限も変わるため）
-    if not st.session_state._suppress:
-        st.session_state._suppress = True
-        # leff から lots を再計算してクランプ
-        lots_lev_now = lots_from_leverage(st.session_state.leff, deposit, s0)
-        st.session_state.lots = max(1, min(lots_lev_now, lots_cap_by_margin(deposit, per_lot_margin)))
-        st.session_state._suppress = False
+    st.session_state.s0 = st.number_input(
+        "初期レート（MXN/JPY）", value=st.session_state.s0,
+        step=0.1, format="%.1f", on_change=on_change_s0
+    )
 
     # 8) 期末レート（0.1円刻み）
-    s1 = st.number_input("期末レート（MXN/JPY）", value=8.2, step=0.1, format="%.1f")
+    st.session_state.s1 = st.number_input(
+        "期末レート（MXN/JPY）", value=st.session_state.s1,
+        step=0.1, format="%.1f"
+    )
 
     # 9) 運用期間
-    days = st.slider("運用期間（日）", min_value=30, max_value=730, value=365, step=5)
+    st.session_state.days = st.slider(
+        "運用期間（日）", min_value=30, max_value=730, value=st.session_state.days, step=5
+    )
 
-# =========================================
+# ================================
 # 本体（KPIのみ）
-# =========================================
+# ================================
 st.title("FXシミュレーション")
 
 # 価格系列（直線。損益計算にのみ使用）
-prices = build_prices_linear(days, s0, s1)
+prices = build_prices_linear(st.session_state.days, st.session_state.s0, st.session_state.s1)
 
 # 計算（手数料込み）
 sm = compute_series(
     prices=prices,
-    initial_deposit=deposit,
+    initial_deposit=st.session_state.deposit,
     lots=st.session_state.lots,
     direction_sign=dir_sign,
     swap_per_lot_per_day_input=swap_per_lot_per_day,
 )
 
 # 実効レバ（結果）& 必要証拠金合計
-leff_actual = (st.session_state.lots * s0 * LOT_UNITS) / deposit if deposit > 0 and s0 > 0 else 0.0
-need_margin_total = per_lot_margin * st.session_state.lots
+leff_actual = (
+    (st.session_state.lots * st.session_state.s0 * LOT_UNITS) / st.session_state.deposit
+    if st.session_state.deposit > 0 and st.session_state.s0 > 0 else 0.0
+)
+need_margin_total = st.session_state.per_lot_margin * st.session_state.lots
 
 # ===== KPI（ご指定の順） =====
 k1, k2, k3 = st.columns(3)
@@ -198,6 +220,8 @@ c1.caption(f"実効レバレッジ（計算結果）：{leff_actual:.2f} 倍")
 c2.caption(f"必要証拠金の目安（合計）：{need_margin_total:,} 円")
 
 # 注記
+cap_display = lots_cap_by_margin(st.session_state.deposit, st.session_state.per_lot_margin)
 st.caption("手数料：1100円（消費税込み）売買成立時に発生")
-st.caption(f"証拠金上限（枚数）：{lots_cap_by_margin(deposit, per_lot_margin)} 枚")
+st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
+
 
