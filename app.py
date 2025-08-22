@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 import math
 import uuid
-import socket
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -17,16 +15,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ===== 依存（QRコードは任意） =====
-try:
-    import qrcode  # pip install qrcode[pil]
-    QR_AVAILABLE = True
-except Exception:
-    QR_AVAILABLE = False
-
 # ===== 定数 =====
 LOT_UNITS = 100_000                 # 1枚=10万通貨
-FEE_PER_LOT_PER_SIDE = 1_100.0      # 手数料（片側/枚/税込）…建て・決済の2回（固定コスト）
+FEE_PER_LOT_PER_SIDE = 1_100.0      # 手数料（片側/枚/税込）…建て・決済の2回
 
 # ===== ユーティリティ =====
 def safe_floor(x: float) -> int:
@@ -37,9 +28,9 @@ def safe_floor(x: float) -> int:
         return 0
 
 def build_prices_linear(days: int, s0: float, s1: float) -> np.ndarray:
-    """初期～期末を直線で補間（表示はしない／損益計算にのみ使用）"""
+    """初期～期末を直線補間（損益計算用）"""
     days = max(1, int(days))
-    return np.linspace(s0, s1, days + 1)  # n = days+1（初日を含む）
+    return np.linspace(s0, s1, days + 1)
 
 def lots_cap_by_margin(deposit: float, per_lot_margin: float) -> int:
     """証拠金基準の上限枚数（切り下げ、最低1）"""
@@ -50,6 +41,7 @@ def lots_from_leverage(leff: float, deposit: float, s0: float) -> int:
     if s0 <= 0: return 1
     return max(1, safe_floor((leff * deposit) / (s0 * LOT_UNITS)))
 
+# ===== 損益計算（手数料=固定・売りはスワップをマイナス・初日はスワップ0） =====
 def compute_series(prices: np.ndarray,
                    initial_deposit: float,
                    lots: int,
@@ -60,7 +52,7 @@ def compute_series(prices: np.ndarray,
     units = lots * LOT_UNITS
     diff = np.diff(prices, prepend=prices[0])  # 初日は0
 
-    # スワップ：買い=＋、売り=−。初日は0、翌日以降に計上（合計＝日額×枚数×日数）
+    # スワップ：買い=＋、売り=−。初日は0、翌日以降に計上
     swap_per_lot_effective = (1 if direction_sign == 1 else -1) * abs(swap_per_lot_per_day_input)
     daily_swap = swap_per_lot_effective * lots
     swap = np.zeros(n, dtype=float)
@@ -81,7 +73,7 @@ def compute_series(prices: np.ndarray,
     pnl_total = pnl_fx + swap + fee
     equity = initial_deposit + np.cumsum(pnl_total)
 
-    # 集計（手数料は常にコスト：fee_totalは負）
+    # 集計（手数料は常にコスト）
     fx_total   = float(pnl_fx.sum())
     swap_total = float(swap.sum())
     fee_total  = float(fee.sum())
@@ -100,28 +92,13 @@ def compute_series(prices: np.ndarray,
     }
     return summary
 
-def get_lan_ip() -> str:
-    """LAN内からアクセスできるIPを極力取得（失敗時は127.0.0.1）"""
-    ip = "127.0.0.1"
-    try:
-        # ルータ向けに疎通不要のUDP接続を一瞬張って自NICのIPを得る
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        try:
-            ip = socket.gethostbyname(socket.gethostname())
-        except Exception:
-            pass
-    return ip
-
 # ================================
-# サイドバー（実効レバ⇄枚数：相互更新）
+# サイドバー（実効レバ⇄枚数 相互更新）
 # ================================
 with st.sidebar:
     st.header("入力")
 
+    # セッション初期値
     defaults = {
         "deposit": 10_000_000,
         "per_lot_margin": 40_000,
@@ -222,7 +199,7 @@ st.caption("手数料：1100円（消費税込み）売買成立時に発生（�
 st.caption(f"証拠金上限（枚数）：{cap_display} 枚")
 
 # ================================
-# チャート（ページ最後に横長で表示）— 初期シンボルは FX_IDC
+# チャート（ページ最後に横長で表示・初期は FX_IDC）
 # ================================
 st.markdown("### レートチャート（TradingView）")
 st.caption(
@@ -230,8 +207,9 @@ st.caption(
     f"方向: {'買い' if dir_sign==1 else '売り'} ｜ 枚数: {st.session_state.lots}枚 (レバ {leff_actual:.2f}倍)"
 )
 
+# 初期選択が FX_IDC になるよう並び順＆indexを設定
 symbol_choices = ["FX_IDC:MXNJPY", "OANDA:MXNJPY", "FOREXCOM:MXNJPY", "SAXO:MXNJPY"]
-tv_symbol = st.selectbox("データ提供元（MXN/JPY）", symbol_choices, index=0, help="表示できない場合は他の提供元に切替")
+tv_symbol = st.selectbox("データ提供元（MXN/JPY）", symbol_choices, index=0)
 
 container_id = f"tv_{uuid.uuid4().hex}"
 tradingview_embed = f"""
@@ -242,7 +220,7 @@ tradingview_embed = f"""
     new TradingView.widget({{
       "container_id": "{container_id}",
       "width": "100%",
-      "height": 380,                 // 横長リボン感（360〜420で微調整）
+      "height": 380,                 // 横長リボン感（360〜420で微調整可）
       "symbol": "{tv_symbol}",
       "interval": "D",
       "timezone": "Asia/Tokyo",
@@ -262,28 +240,7 @@ tradingview_embed = f"""
   </script>
 </div>
 """
-components.html(tradingview_embed, height=400)
-
-# ================================
-# iPad 接続用：URL表示 & QRコード（ページの一番下）
-# ================================
-st.divider()
-st.subheader("📲 iPad 接続リンク（同じWi-Fi内）")
-
-lan_ip = get_lan_ip()
-port_hint = 8501  # デフォルトで起動している想定。変更した場合は下記URLのポートを置き換え。
-url = f"http://{lan_ip}:{port_hint}"
-
-st.write("iPad の Safari で次のURLを開くか、QRコードを読み取ってください。")
-st.code(url)
-
-if QR_AVAILABLE:
-    img = qrcode.make(url)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    st.image(buf.getvalue(), caption="← iPadでこのQRを読み取る", width=220)
-else:
-    st.info("QRコード表示には `pip install qrcode[pil]` を実行してください。URLコピペでも利用できます。")
+components.html(tradingview_embed, height=400)  # 埋め込みコンテナの高さも近い値に
 
 
 
